@@ -95,7 +95,8 @@ def build_report_html(
     <div>
       <p class="eyebrow">AIPM Planning and Scheduling Agent</p>
       <h1>Middle-Level Plan and Schedule Visual Report</h1>
-      <p class="subtle">Generated {escape(generated_at)} from current order, activity, resource, and reference schedule CSV files.</p>
+      <p class="subtle">Generated {escape(generated_at)} from current order, activity, resource, and optional reference/progress CSV files.</p>
+      <a class="button-link" href="process_management_report.html">View Process Panel</a>
     </div>
     <div class="meta">
       <span>Schedule CSV</span>
@@ -104,11 +105,12 @@ def build_report_html(
   </header>
   {dashboard_section(summary)}
   {agent_diagnosis_section(agent_findings or [])}
-  {gantt_section(generated_rows)}
-  {resource_load_section(generated_rows)}
-  {order_timeline_section(generated_rows)}
+  {feasibility_validation_section(dataset, generated_rows)}
   {comparison_section(comparisons, generated_rows, dataset.reference_schedule)}
   {field_rule_diagnostics_section(generated_rows, dataset.reference_schedule)}
+  {resource_load_section(generated_rows)}
+  {gantt_section(generated_rows)}
+  {order_timeline_section(generated_rows)}
   {timing_divergence_section(comparisons, generated_rows, dataset.reference_schedule)}
   {flow_section(dataset.activities)}
 </body>
@@ -124,28 +126,39 @@ def build_process_management_report_html(
     schedule_report_url: str = "agent_schedule_report.html",
 ) -> str:
     from execution_management import monitor_execution
-    from work_order_agent import demo_work_orders, generate_work_orders, render_work_order_card, work_order_css
+    from work_order_agent import generate_work_orders, render_work_order_card, work_order_css
 
     progress_rows = progress_rows or []
     monitor = monitor_execution(schedule_rows, progress_rows)
     work_orders = generate_work_orders(schedule_rows, progress_rows)
     summary = monitor.summary
+    downstream_at_risk = _downstream_at_risk_count(schedule_rows, progress_rows)
+    manager_actions = _manager_action_items(monitor.findings, downstream_at_risk, monitor.has_progress)
     generated_at = datetime.now().strftime("%Y-%m-%d %H:%M")
     finding_rows = "\n".join(
         f"""<tr>
-          <td>{escape(finding.severity)}</td>
+          <td>{_severity_badge(finding.severity)}</td>
           <td>{escape(finding.wbs)}</td>
-          <td>{escape(finding.operation_no)} {escape(finding.activity_name)}</td>
+          <td>{escape(finding.operation_no)}</td>
+          <td>{escape(finding.activity_name)}</td>
           <td>{escape(finding.status)}</td>
+          <td>{escape(finding.planned_finish)}</td>
+          <td>{escape(finding.actual_finish or '-')}</td>
           <td>{escape(finding.message)}</td>
         </tr>"""
         for finding in monitor.findings[:30]
     )
     if not finding_rows:
-        finding_rows = '<tr><td colspan="5">No execution exceptions detected.</td></tr>'
-    cards = "\n".join(render_work_order_card(order) for order in demo_work_orders(work_orders, limit=8))
+        finding_rows = '<tr><td colspan="8">No execution exceptions detected.</td></tr>'
+    action_items = "\n".join(f"<li>{escape(item)}</li>" for item in manager_actions)
+    updated_work_orders = [
+        order
+        for order in work_orders
+        if order.execution_status.casefold() != "not_reported"
+    ]
+    cards = "\n".join(render_work_order_card(order) for order in updated_work_orders[:12])
     if not cards:
-        cards = "<p>No work-order examples were generated.</p>"
+        cards = '<p class="statline">No updated work orders are shown because no progress rows were reported for scheduled operations.</p>'
 
     return f"""<!doctype html>
 <html lang="en">
@@ -158,8 +171,8 @@ def build_process_management_report_html(
 <body>
   <header>
     <div>
-      <p class="eyebrow">AIPM Process Management</p>
-      <h1>Execution Status and Work Orders</h1>
+      <p class="eyebrow">AIPM Process Management Agent</p>
+      <h1>Execution Monitoring and Work Orders</h1>
       <p class="subtle">Generated {escape(generated_at)} from the current schedule and optional progress updates.</p>
     </div>
     <div class="meta">
@@ -173,22 +186,38 @@ def build_process_management_report_html(
       <article class="card"><span>Completed</span><strong>{summary.completed}</strong></article>
       <article class="card"><span>In Progress</span><strong>{summary.in_progress}</strong></article>
       <article class="card"><span>Blocked / Delayed</span><strong>{summary.blocked_or_delayed}</strong></article>
-      <article class="card"><span>Late Unfinished</span><strong>{summary.late_unfinished}</strong></article>
+      <article class="card"><span>Overdue Unfinished</span><strong>{summary.late_unfinished}</strong></article>
+      <article class="card"><span>Downstream At Risk</span><strong>{downstream_at_risk}</strong></article>
     </div>
     {'' if monitor.has_progress else '<p class="subtle">No actual_progress.csv file was provided for this run.</p>'}
+  </section>
+  <section>
+    <h2>Management Focus</h2>
+    <div class="split">
+      <div class="panel diagnosis">
+        <h3>Immediate Actions</h3>
+        <ul>{action_items}</ul>
+      </div>
+      <div class="panel diagnosis">
+        <h3>Progress Coverage</h3>
+        <p class="statline">{_progress_coverage_text(len(schedule_rows), summary.progress_rows, monitor.has_progress)}</p>
+        <p class="statline">{_risk_summary_text(summary.blocked_or_delayed, summary.late_unfinished, downstream_at_risk)}</p>
+      </div>
+    </div>
   </section>
   <section>
     <h2>Execution Exceptions</h2>
     <div class="panel scroll">
       <table>
-        <thead><tr><th>Severity</th><th>WBS</th><th>Operation</th><th>Status</th><th>Message</th></tr></thead>
+        <thead><tr><th>Severity</th><th>WBS</th><th>Operation</th><th>Activity</th><th>Status</th><th>Planned Finish</th><th>Actual Finish</th><th>Message</th></tr></thead>
         <tbody>{finding_rows}</tbody>
       </table>
     </div>
   </section>
   <section>
-    <h2>Generated Work Order Examples</h2>
-    <div class="cards">{cards}</div>
+    <h2>Updated Work Orders</h2>
+    <p class="statline">This section lists only work orders touched by actual progress updates, such as completed, in-progress, blocked, or delayed operations. It is intentionally empty when no progress has been reported.</p>
+    <div class="work-order-grid">{cards}</div>
   </section>
 </body>
 </html>"""
@@ -216,6 +245,110 @@ def agent_diagnosis_section(findings: list[str]) -> str:
     </section>"""
 
 
+# What: Process-report severity badge renderer.
+# Purpose: Makes execution exception severity scannable for managers.
+def _severity_badge(severity: str) -> str:
+    normalized = severity.casefold()
+    if normalized == "critical":
+        css_class = "status-violated"
+    elif normalized == "warning":
+        css_class = "status-warning"
+    else:
+        css_class = "status-passed"
+    return f'<span class="status-pill {css_class}">{escape(severity.title())}</span>'
+
+
+# What: Downstream risk estimator.
+# Purpose: Counts unfinished downstream operations in the same WBS after blocked or delayed progress rows.
+def _downstream_at_risk_count(
+    schedule_rows: list[dict[str, str]],
+    progress_rows: list[dict[str, str]],
+) -> int:
+    if not progress_rows:
+        return 0
+    blocked_keys = {
+        _process_key(row)
+        for row in progress_rows
+        if str(row.get("状態", "")).casefold() in {"blocked", "delayed", "遅延", "停止", "保留"}
+    }
+    if not blocked_keys:
+        return 0
+    progress_by_key = {_process_key(row): row for row in progress_rows}
+    schedule_by_wbs: dict[str, list[dict[str, str]]] = defaultdict(list)
+    for row in schedule_rows:
+        schedule_by_wbs[row.get("WBS", "")].append(row)
+    risk_keys = set()
+    for wbs, _part_no, operation_no, _activity_id in blocked_keys:
+        try:
+            blocked_operation = int(operation_no)
+        except ValueError:
+            blocked_operation = -1
+        for row in schedule_by_wbs.get(wbs, []):
+            key = _process_key(row)
+            if key in progress_by_key:
+                continue
+            try:
+                operation = int(row.get("工程NO", ""))
+            except ValueError:
+                operation = -1
+            if operation > blocked_operation:
+                risk_keys.add(key)
+    return len(risk_keys)
+
+
+# What: Process-row key.
+# Purpose: Matches schedule and progress rows without importing execution internals into the visualizer.
+def _process_key(row: dict[str, str]) -> tuple[str, str, str, str]:
+    return (
+        row.get("WBS", ""),
+        row.get("部品NO", ""),
+        row.get("工程NO", ""),
+        row.get("作業工程ID", ""),
+    )
+
+
+# What: Manager action list builder.
+# Purpose: Turns execution findings into short operational next steps.
+def _manager_action_items(findings, downstream_at_risk: int, has_progress: bool) -> list[str]:
+    if not has_progress:
+        return [
+            "Upload actual_progress.csv to activate execution monitoring.",
+            "Use the progress-template CSV so each workgroup reports status with the correct schedule keys.",
+            "Review generated work orders as planned dispatch candidates, not live execution evidence.",
+        ]
+    critical = [finding for finding in findings if finding.severity.casefold() == "critical"]
+    warning = [finding for finding in findings if finding.severity.casefold() == "warning"]
+    actions: list[str] = []
+    if critical:
+        actions.append(f"Resolve {len(critical)} critical blocked/delayed execution exceptions before dispatching dependent work.")
+    if warning:
+        actions.append(f"Review {len(warning)} warning item(s), especially completed-late operations that may shift downstream assumptions.")
+    if downstream_at_risk:
+        actions.append(f"Check {downstream_at_risk} downstream operation(s) at risk from blocked or delayed predecessors.")
+    actions.append("Refresh actual_progress.csv after workgroup updates and rerun the progress scenario.")
+    return actions
+
+
+# What: Progress coverage text.
+# Purpose: Explains how much of the schedule is covered by actual progress rows.
+def _progress_coverage_text(total_rows: int, progress_rows: int, has_progress: bool) -> str:
+    if not has_progress:
+        return "No progress file was provided, so this panel shows planned dispatch only."
+    coverage = progress_rows / total_rows * 100 if total_rows else 0
+    return f"{progress_rows} of {total_rows} scheduled operations have progress updates ({coverage:.1f}% coverage)."
+
+
+# What: Process risk summary text.
+# Purpose: Provides a compact management interpretation of execution risk.
+def _risk_summary_text(blocked: int, late_unfinished: int, downstream_at_risk: int) -> str:
+    if not any([blocked, late_unfinished, downstream_at_risk]):
+        return "No blocked, delayed, or downstream-at-risk operations were detected from the supplied progress file."
+    return (
+        f"{blocked} blocked/delayed operation(s), {late_unfinished} overdue unfinished operation(s), "
+        f"and {downstream_at_risk} downstream operation(s) should be reviewed."
+    )
+
+
 # What: Dataset and schedule summary calculator.
 # Purpose: Feeds the dashboard cards with compact management-level metrics.
 def summarize(
@@ -224,27 +357,43 @@ def summarize(
     comparisons: list[dict[str, object]],
 ) -> dict[str, object]:
     overloaded = [row for row in generated_rows if row.get("負荷状態") == "1:OV"]
-    late = []
+    late_orders: dict[str, float] = {}
     for row in generated_rows:
         finish = parse_datetime(row.get("スケジュール結果終了日時", ""))
         due = parse_datetime(row.get("納期", ""))
         if finish and due and finish > due:
-            late.append(row)
+            late_orders[row.get("WBS", "")] = max(
+                late_orders.get(row.get("WBS", ""), 0),
+                (finish - due).total_seconds() / 3600,
+            )
 
     start_deltas = [abs(int(item["start_delta_minutes"])) for item in comparisons if item["matched"]]
+    finish_deltas = [abs(int(item["finish_delta_minutes"])) for item in comparisons if item["matched"]]
     avg_start_delta = sum(start_deltas) / len(start_deltas) if start_deltas else 0
+    avg_finish_delta = sum(finish_deltas) / len(finish_deltas) if finish_deltas else 0
+    dated_rows = _rows_with_dates(generated_rows)
+    makespan_hours = 0.0
+    if dated_rows:
+        start, finish = _date_extent(dated_rows)
+        makespan_hours = (finish - start).total_seconds() / 3600
 
     return {
         "orders": len(dataset.product_orders),
         "activities": len(generated_rows),
         "resources": len({row.get("資源ID", "") for row in generated_rows if row.get("資源ID")}),
         "overloaded": len(overloaded),
-        "late": len(late),
+        "late_orders": len([wbs for wbs in late_orders if wbs]),
+        "total_tardiness_hours": sum(late_orders.values()),
+        "max_tardiness_hours": max(late_orders.values(), default=0),
+        "makespan_hours": makespan_hours,
+        "domain_rule_violations": len(_domain_precedence_violations(generated_rows)),
         "reference_matches": sum(1 for item in comparisons if item["matched"]),
         "reference_total": len(comparisons),
+        "reference_available": bool(dataset.reference_schedule),
         "exact_matches": sum(1 for item in comparisons if item["exact_match"]),
         "resource_matches": sum(1 for item in comparisons if item["resource_match"]),
         "avg_start_delta_hours": avg_start_delta / 60,
+        "avg_finish_delta_hours": avg_finish_delta / 60,
     }
 
 
@@ -308,33 +457,98 @@ def column_difference_counts(
 # What: Dashboard HTML section.
 # Purpose: Presents the highest-level schedule health metrics before detailed visuals.
 def dashboard_section(summary: dict[str, object]) -> str:
-    cards = [
+    profile_cards = [
         ("Orders", summary["orders"]),
         ("Activities", summary["activities"]),
         ("Resources Used", summary["resources"]),
-        ("Overload Flags", summary["overloaded"]),
-        ("Late Activities", summary["late"]),
-        (
-            "Reference Matches",
-            f"{summary['reference_matches']} / {summary['reference_total']}",
-        ),
-        ("Exact Row Matches", summary["exact_matches"]),
-        (
-            "Resource Matches",
-            f"{summary['resource_matches']} / {summary['reference_total']}",
-        ),
-        ("Avg Start Delta", f"{summary['avg_start_delta_hours']:.1f} h"),
     ]
-    card_html = "\n".join(
+    quality_cards = [
+        ("Late Orders", summary["late_orders"]),
+        ("Total Tardiness", f"{float(summary['total_tardiness_hours']):.1f} h"),
+        ("Max Tardiness", f"{float(summary['max_tardiness_hours']):.1f} h"),
+        ("Overload Flags", summary["overloaded"]),
+        ("Domain Rule Violations", summary["domain_rule_violations"]),
+        ("Makespan", f"{float(summary['makespan_hours']):.1f} h"),
+    ]
+    if summary["reference_available"]:
+        reference_cards = [
+            ("Reference Matches", f"{summary['reference_matches']} / {summary['reference_total']}"),
+            ("Exact Row Matches", summary["exact_matches"]),
+            ("Resource Matches", f"{summary['resource_matches']} / {summary['reference_total']}"),
+            ("Avg Start Delta", f"{float(summary['avg_start_delta_hours']):.1f} h"),
+            ("Avg Finish Delta", f"{float(summary['avg_finish_delta_hours']):.1f} h"),
+        ]
+    else:
+        reference_cards = [
+            ("Reference Matches", "No reference provided"),
+            ("Exact Row Matches", "N/A"),
+            ("Resource Matches", "N/A"),
+            ("Avg Start Delta", "N/A"),
+            ("Avg Finish Delta", "N/A"),
+        ]
+
+    return f"""<section>
+      <h2>Dashboard Summary</h2>
+      <div class="dashboard-block">
+        <h3>Schedule Profile</h3>
+        <div class="cards">{_cards_html(profile_cards)}</div>
+      </div>
+      <div class="dashboard-block primary">
+        <h3>Schedule Quality</h3>
+        <p class="statline">Primary measures of schedule health, independent of exact reference reconstruction.</p>
+        <div class="cards">{_cards_html(quality_cards)}</div>
+      </div>
+      <div class="dashboard-block secondary">
+        <h3>Reference Comparison</h3>
+        <p class="statline">Secondary measures showing how closely the generated schedule reconstructs the provided middle schedule when a reference is available.</p>
+        <div class="cards">{_cards_html(reference_cards)}</div>
+      </div>
+    </section>"""
+
+
+# What: Metric-card renderer.
+# Purpose: Keeps dashboard card markup consistent across profile, quality, and comparison groups.
+def _cards_html(cards: list[tuple[str, object]]) -> str:
+    return "\n".join(
         f"""<article class="card">
           <span>{escape(label)}</span>
           <strong>{escape(str(value))}</strong>
         </article>"""
         for label, value in cards
     )
-    return f"""<section>
-      <h2>Dashboard Summary</h2>
-      <div class="cards">{card_html}</div>
+
+
+# What: Feasibility validation report section.
+# Purpose: Checks the generated schedule against encoded production constraints, not against the reference schedule.
+def feasibility_validation_section(dataset: AIPMDataset, rows: list[dict[str, str]]) -> str:
+    overload_rows = [row for row in rows if row.get("負荷状態") == "1:OV"]
+    capacity_conflicts = _capacity_conflicts(dataset, rows)
+    precedence_violations = _domain_precedence_violations(rows)
+    overlaps = _same_phase_overlaps(rows)
+    cards = [
+        ("Overload Rows", len(overload_rows), "Review" if overload_rows else "Passed", "status-warning" if overload_rows else "status-passed"),
+        ("Capacity Conflicts", len(capacity_conflicts), "Failed" if capacity_conflicts else "Passed", "status-violated" if capacity_conflicts else "status-passed"),
+        ("Domain Precedence Violations", len(precedence_violations), "Failed" if precedence_violations else "Passed", "status-violated" if precedence_violations else "status-passed"),
+        ("Same-Phase Overlap Reviews", len(overlaps), "Review" if overlaps else "Passed", "status-warning" if overlaps else "status-passed"),
+    ]
+    card_html = "\n".join(
+        f"""<article class="rule-card">
+          <h4>{escape(label)}</h4>
+          <div class="rule-metrics">
+            <span><strong>{count}</strong> findings</span>
+            <span><span class="status-pill {status_class}">{escape(status)}</span></span>
+          </div>
+        </article>"""
+        for label, count, status, status_class in cards
+    )
+    return f"""<section class="report-group">
+      <h2>Feasibility Validation</h2>
+      <p class="statline">This section checks whether the generated schedule is trustworthy under the currently encoded production constraints. It is intentionally stricter than reference comparison.</p>
+      <div class="rule-grid">{card_html}</div>
+      {_capacity_conflicts_section(capacity_conflicts)}
+      {_precedence_violations_section(precedence_violations)}
+      {_overload_rows_section(overload_rows)}
+      {_same_phase_overlaps_section(overlaps)}
     </section>"""
 
 
@@ -372,6 +586,13 @@ def comparison_section(
     generated_rows: list[dict[str, str]],
     reference_rows: list[dict[str, str]],
 ) -> str:
+    if not reference_rows:
+        return """<section>
+      <h2>Reference Comparison</h2>
+      <div class="panel">
+        <p class="statline">No reference schedule was provided. AIPM2 generated the schedule from order, activity, resource, and encoded domain-rule inputs only.</p>
+      </div>
+    </section>"""
     mismatch_count = sum(1 for item in comparisons if not item["resource_match"])
     exact_count = sum(1 for item in comparisons if item["exact_match"])
     column_diffs = column_difference_counts(generated_rows, reference_rows)
@@ -440,6 +661,8 @@ def timing_divergence_section(
     generated_rows: list[dict[str, str]],
     reference_rows: list[dict[str, str]],
 ) -> str:
+    if not reference_rows:
+        return ""
     reference_by_key = {_activity_key(row): row for row in reference_rows}
     generated_by_key = {_activity_key(row): row for row in generated_rows}
     rows = sorted(
@@ -484,6 +707,13 @@ def timing_divergence_section(
 def field_rule_diagnostics_section(
     generated_rows: list[dict[str, str]], reference_rows: list[dict[str, str]]
 ) -> str:
+    if not reference_rows:
+        return """<section>
+      <h2>Field Rule Diagnostics</h2>
+      <div class="panel diagnosis">
+        <p class="statline">No reference schedule was provided, so field-level generated-vs-reference diagnostics are not available for this run.</p>
+      </div>
+    </section>"""
     fields = [
         "工程計画内外区分",
         "負荷状態",
@@ -511,7 +741,7 @@ def field_rule_diagnostics_section(
         )
     return f"""<section>
       <h2>Field Rule Diagnostics</h2>
-      <div class="panel">
+      <div class="panel diagnosis">
         <table>
           <thead><tr><th>Field</th><th>Matches</th><th>Mismatches</th><th>Match Rate</th></tr></thead>
           <tbody>{''.join(rows)}</tbody>
@@ -526,6 +756,224 @@ def flow_section(activities: list[dict[str, str]]) -> str:
     return f"""<section>
       <h2>Process Flow</h2>
       <div class="panel scroll">{process_flow_svg(activities)}</div>
+    </section>"""
+
+
+# What: Capacity conflict detector.
+# Purpose: Finds resource time points where overlapping generated work exceeds resource capacity.
+def _capacity_conflicts(dataset: AIPMDataset, rows: list[dict[str, str]]) -> list[dict[str, object]]:
+    resource_lookup = dataset.resources_by_id
+    conflicts: list[dict[str, object]] = []
+    rows_by_resource: dict[str, list[dict[str, object]]] = defaultdict(list)
+    for row in _rows_with_dates(rows):
+        resource_id = str(row.get("資源ID", ""))
+        if resource_id:
+            rows_by_resource[resource_id].append(row)
+    for resource_id, resource_rows in rows_by_resource.items():
+        try:
+            capacity = float(resource_lookup.get(resource_id, {}).get("保有量", "") or 1)
+        except ValueError:
+            capacity = 1.0
+        capacity = max(capacity, 1.0)
+        event_times = sorted({row["_start"] for row in resource_rows} | {row["_finish"] for row in resource_rows})
+        for time_value in event_times:
+            active = [
+                row
+                for row in resource_rows
+                if row["_start"] <= time_value < row["_finish"]
+            ]
+            if len(active) > capacity:
+                conflicts.append(
+                    {
+                        "resource_id": resource_id,
+                        "resource": active[0].get("資源名称", ""),
+                        "time": time_value,
+                        "load": float(len(active)),
+                        "capacity": capacity,
+                        "active_work": ", ".join(sorted({str(row.get("作業工程名称", "")) for row in active})),
+                    }
+                )
+                break
+    return sorted(conflicts, key=lambda item: (str(item["resource_id"]), str(item["time"])))
+
+
+# What: Domain precedence violation detector.
+# Purpose: Checks generated rows against PDF #2/#3 operation-order rules.
+def _domain_precedence_violations(rows: list[dict[str, str]]) -> list[dict[str, object]]:
+    try:
+        from marine_design_process_rules import documented_precedence_edges
+        from sponsor_domain_rules import sponsor_precedence_edges
+    except Exception:
+        return []
+    edges = documented_precedence_edges() | sponsor_precedence_edges()
+    by_wbs_signature: dict[tuple[str, tuple[str, str, str, str]], dict[str, object]] = {}
+    for row in _rows_with_dates(rows):
+        by_wbs_signature[(str(row.get("WBS", "")), _operation_signature(row))] = row
+    violations: list[dict[str, object]] = []
+    wbs_values = sorted({str(row.get("WBS", "")) for row in rows})
+    for wbs in wbs_values:
+        for before, after in edges:
+            before_row = by_wbs_signature.get((wbs, before))
+            after_row = by_wbs_signature.get((wbs, after))
+            if not before_row or not after_row:
+                continue
+            if before_row["_finish"] > after_row["_start"]:
+                violations.append(
+                    {
+                        "wbs": wbs,
+                        "before": f"{before_row.get('工程NO', '')} {before_row.get('作業工程名称', '')}".strip(),
+                        "before_finish": before_row["_finish"],
+                        "after": f"{after_row.get('工程NO', '')} {after_row.get('作業工程名称', '')}".strip(),
+                        "after_start": after_row["_start"],
+                        "violation_hours": (before_row["_finish"] - after_row["_start"]).total_seconds() / 3600,
+                    }
+                )
+    return sorted(violations, key=lambda item: float(item["violation_hours"]), reverse=True)
+
+
+# What: Same-phase overlap detector.
+# Purpose: Flags potentially suspicious parallel work inside the same WBS and process phase for planner review.
+def _same_phase_overlaps(rows: list[dict[str, str]]) -> list[dict[str, object]]:
+    grouped: dict[tuple[str, str], list[dict[str, object]]] = defaultdict(list)
+    for row in _rows_with_dates(rows):
+        grouped[(str(row.get("WBS", "")), str(row.get("基本工区名称", "")))].append(row)
+    overlaps: list[dict[str, object]] = []
+    for (wbs, phase), group_rows in grouped.items():
+        sorted_rows = sorted(group_rows, key=lambda row: row["_start"])
+        for index, left in enumerate(sorted_rows):
+            for right in sorted_rows[index + 1 :]:
+                overlap_seconds = (min(left["_finish"], right["_finish"]) - max(left["_start"], right["_start"])).total_seconds()
+                if overlap_seconds > 0:
+                    overlaps.append(
+                        {
+                            "wbs": wbs,
+                            "phase": phase,
+                            "activity_a": f"{left.get('工程NO', '')} {left.get('作業工程名称', '')}".strip(),
+                            "activity_b": f"{right.get('工程NO', '')} {right.get('作業工程名称', '')}".strip(),
+                            "overlap_hours": overlap_seconds / 3600,
+                        }
+                    )
+    return sorted(overlaps, key=lambda item: float(item["overlap_hours"]), reverse=True)
+
+
+# What: Operation signature helper.
+# Purpose: Maps generated rows onto documented PDF #2/#3 process-rule signatures.
+def _operation_signature(row: dict[str, object]) -> tuple[str, str, str, str]:
+    return (
+        str(row.get("工程NO", "")),
+        str(row.get("作業工程ID", "")),
+        str(row.get("作業工程名称", "")),
+        str(row.get("基本工区名称", "")),
+    )
+
+
+# What: Capacity-conflict HTML section.
+# Purpose: Presents resource overload conflicts in a compact sponsor-readable table.
+def _capacity_conflicts_section(conflicts: list[dict[str, object]]) -> str:
+    if conflicts:
+        rows = "\n".join(
+            f"""<tr>
+          <td>{escape(item['resource_id'])}</td>
+          <td>{escape(item['resource'])}</td>
+          <td>{escape(item['time'].strftime('%Y-%m-%d %H:%M'))}</td>
+          <td>{float(item['load']):.2f}</td>
+          <td>{float(item['capacity']):.2f}</td>
+          <td>{escape(item['active_work'])}</td>
+        </tr>"""
+            for item in conflicts[:20]
+        )
+    else:
+        rows = '<tr><td colspan="6">No capacity conflicts detected under the current resource-capacity check.</td></tr>'
+    return f"""<section class="subsection">
+      <h3>Capacity Conflicts</h3>
+      <div class="panel compare-table">
+        <table>
+          <thead><tr><th>Resource ID</th><th>Resource</th><th>Time</th><th>Load</th><th>Capacity</th><th>Active Work</th></tr></thead>
+          <tbody>{rows}</tbody>
+        </table>
+      </div>
+    </section>"""
+
+
+# What: Precedence-violation HTML section.
+# Purpose: Shows where generated timing violates encoded sponsor/domain process order.
+def _precedence_violations_section(violations: list[dict[str, object]]) -> str:
+    if not violations:
+        return ""
+    rows = "\n".join(
+        f"""<tr>
+          <td>{escape(item['wbs'])}</td>
+          <td>{escape(item['before'])}</td>
+          <td>{escape(item['before_finish'].strftime('%Y-%m-%d %H:%M'))}</td>
+          <td>{escape(item['after'])}</td>
+          <td>{escape(item['after_start'].strftime('%Y-%m-%d %H:%M'))}</td>
+          <td>{float(item['violation_hours']):.1f}</td>
+        </tr>"""
+        for item in violations[:20]
+    )
+    return f"""<section class="subsection">
+      <h3>Domain Precedence Violations</h3>
+      <div class="panel compare-table">
+        <table>
+          <thead><tr><th>WBS</th><th>Required Before</th><th>Before Finish</th><th>Required After</th><th>After Start</th><th>Violation (h)</th></tr></thead>
+          <tbody>{rows}</tbody>
+        </table>
+      </div>
+    </section>"""
+
+
+# What: Overload-row HTML section.
+# Purpose: Lists generated rows marked overloaded by the current resource-load field logic.
+def _overload_rows_section(rows: list[dict[str, str]]) -> str:
+    if not rows:
+        return ""
+    body = "\n".join(
+        f"""<tr>
+          <td>{escape(row.get('WBS', ''))}</td>
+          <td>{escape(row.get('工程NO', ''))}</td>
+          <td>{escape(row.get('作業工程名称', ''))}</td>
+          <td>{escape(row.get('資源ID', ''))}</td>
+          <td>{escape(row.get('資源名称', ''))}</td>
+          <td>{escape(row.get('スケジュール結果開始日時', ''))}</td>
+          <td>{escape(row.get('スケジュール結果終了日時', ''))}</td>
+        </tr>"""
+        for row in rows[:20]
+    )
+    return f"""<section class="subsection">
+      <h3>Overload Rows</h3>
+      <div class="panel compare-table">
+        <table>
+          <thead><tr><th>WBS</th><th>Operation</th><th>Activity</th><th>Resource ID</th><th>Resource</th><th>Start</th><th>Finish</th></tr></thead>
+          <tbody>{body}</tbody>
+        </table>
+      </div>
+    </section>"""
+
+
+# What: Same-phase overlap HTML section.
+# Purpose: Gives planners review candidates where same-phase operations run in parallel.
+def _same_phase_overlaps_section(overlaps: list[dict[str, object]]) -> str:
+    if not overlaps:
+        return ""
+    rows = "\n".join(
+        f"""<tr>
+          <td>{escape(item['wbs'])}</td>
+          <td>{escape(item['phase'])}</td>
+          <td>{escape(item['activity_a'])}</td>
+          <td>{escape(item['activity_b'])}</td>
+          <td>{float(item['overlap_hours']):.1f}</td>
+        </tr>"""
+        for item in overlaps[:20]
+    )
+    return f"""<section class="subsection">
+      <h3>Same-Phase Overlap Reviews</h3>
+      <p class="statline">These overlaps are not automatically wrong, but they are useful indicators of missing or intentionally parallel process logic.</p>
+      <div class="panel compare-table">
+        <table>
+          <thead><tr><th>WBS</th><th>Phase</th><th>Activity A</th><th>Activity B</th><th>Overlap (h)</th></tr></thead>
+          <tbody>{rows}</tbody>
+        </table>
+      </div>
     </section>"""
 
 
@@ -698,7 +1146,7 @@ def process_flow_svg(activities: list[dict[str, str]]) -> str:
 # Purpose: Keeps the generated HTML report readable without external assets.
 def report_css() -> str:
     return """
-    :root { color-scheme: light; --ink: #0f172a; --muted: #64748b; --line: #e2e8f0; --bg: #f8fafc; --panel: #ffffff; }
+    :root { color-scheme: light; --ink: #0f172a; --muted: #64748b; --line: #e2e8f0; --bg: #f8fafc; --panel: #ffffff; --win-bg: #dcfce7; --win-fg: #166534; --lose-bg: #f5e6d3; --lose-fg: #7c2d12; --tie-bg: #f1f5f9; --tie-fg: #475569; }
     * { box-sizing: border-box; }
     body { margin: 0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--ink); background: var(--bg); }
     header { display: flex; justify-content: space-between; gap: 24px; align-items: flex-end; padding: 32px 40px 20px; border-bottom: 1px solid var(--line); background: #fff; }
@@ -714,8 +1162,24 @@ def report_css() -> str:
     .meta { min-width: 260px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; background: #f8fafc; }
     .meta span { display: block; color: var(--muted); font-size: 12px; }
     .meta strong { display: block; margin-top: 4px; font-size: 13px; overflow-wrap: anywhere; }
+    .button-link { display: inline-flex; align-items: center; min-height: 36px; margin-top: 14px; padding: 7px 12px; border-radius: 8px; background: #1d4ed8; color: #fff; font-size: 13px; font-weight: 800; text-decoration: none; }
+    .button-link:hover { background: #1e40af; }
+    .dashboard-block { margin-top: 16px; }
+    .dashboard-block:first-of-type { margin-top: 0; }
+    .dashboard-block.primary { padding: 16px; border: 1px solid #bbf7d0; border-radius: 8px; background: #f0fdf4; }
+    .dashboard-block.secondary { padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
     .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
     .comparison-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 16px; }
+    .report-group { margin: 24px 40px; padding: 22px; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+    .report-group > h2 { margin-bottom: 18px; font-size: 22px; }
+    .subsection { padding: 0; margin-top: 18px; }
+    .subsection:first-of-type { margin-top: 0; }
+    .rule-grid + .subsection { margin-top: 28px; }
+    .rule-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; }
+    .rule-card { padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: #f8fafc; }
+    .rule-card h4 { margin: 0 0 10px; font-size: 13px; color: #0f172a; overflow-wrap: anywhere; }
+    .rule-metrics { display: grid; gap: 6px; color: var(--muted); font-size: 12px; }
+    .rule-metrics strong { color: var(--ink); font-size: 15px; }
     .card, .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
     .card { padding: 16px; }
     .card span { display: block; color: var(--muted); font-size: 12px; }
@@ -735,6 +1199,10 @@ def report_css() -> str:
     .diagnosis-markdown h4 span { color: #2563eb; }
     .diagnosis-markdown p { margin: 8px 0; line-height: 1.5; }
     .diagnosis-markdown ul { margin: 6px 0 12px; }
+    .status-pill { display: inline-flex; align-items: center; min-height: 22px; padding: 3px 8px; border-radius: 999px; font-size: 11px; font-weight: 800; white-space: nowrap; }
+    .status-passed { color: var(--win-fg); background: var(--win-bg); }
+    .status-warning { color: #854d0e; background: #fef3c7; }
+    .status-violated { color: var(--lose-fg); background: var(--lose-bg); }
     code { padding: 1px 5px; border-radius: 4px; background: #f1f5f9; color: #0f172a; }
     svg { display: block; max-width: none; }
     .axis-label { font-size: 11px; fill: #334155; }
@@ -742,7 +1210,7 @@ def report_css() -> str:
     .bar-label { font-size: 10px; fill: #fff; font-weight: 700; pointer-events: none; }
     .flow-label { font-size: 12px; fill: #fff; font-weight: 700; }
     .flow-sub { font-size: 11px; fill: #e2e8f0; }
-    @media (max-width: 900px) { header { display: block; padding: 24px; } section { padding: 20px 24px; } .meta { margin-top: 16px; } .split { grid-template-columns: 1fr; } }
+    @media (max-width: 900px) { header { display: block; padding: 24px; } section { padding: 20px 24px; } .report-group { margin: 20px 24px; padding: 18px; } .subsection { padding: 0; } .meta { margin-top: 16px; } .split { grid-template-columns: 1fr; } }
     """
 
 

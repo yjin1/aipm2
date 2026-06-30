@@ -144,20 +144,31 @@ def render_work_orders_html(work_orders: list[WorkOrder], limit: int = 30) -> st
 # Purpose: Makes one operation instruction readable for workgroups and managers.
 def render_work_order_card(order: WorkOrder) -> str:
     risk_class = html.escape(order.risk_level.lower())
-    return f"""<article class="card {risk_class}">
-      <div class="card-head">
-        <strong>{html.escape(order.work_order_id)}</strong>
-        <span>{html.escape(order.priority)} / {html.escape(order.risk_level)}</span>
+    return f"""<article class="work-order-card {risk_class}">
+      <div class="work-order-head">
+        <div>
+          <span class="ticket-label">Work Order</span>
+          <strong>{html.escape(_compact_work_order_id(order))}</strong>
+        </div>
+        <div class="badge-stack">
+          <span class="status-pill priority-{html.escape(order.priority.lower())}">{html.escape(order.priority)}</span>
+          <span class="status-pill risk-{risk_class}">{html.escape(order.risk_level)}</span>
+        </div>
       </div>
-      <h2>{html.escape(order.activity_name)}</h2>
-      <dl>
-        <div><dt>WBS</dt><dd>{html.escape(order.wbs)}</dd></div>
-        <div><dt>Workgroup</dt><dd>{html.escape(order.workgroup)}</dd></div>
+      <h3>{html.escape(order.activity_name)}</h3>
+      <p class="ticket-subtitle">{html.escape(order.wbs)}</p>
+      <dl class="ticket-grid">
+        <div><dt>Group</dt><dd>{html.escape(order.workgroup)}</dd></div>
+        <div><dt>Operation</dt><dd>{html.escape(order.operation_no)} / {html.escape(order.activity_id)}</dd></div>
         <div><dt>Resource</dt><dd>{html.escape(order.resource_id)} {html.escape(order.resource_name)}</dd></div>
-        <div><dt>Planned Window</dt><dd>{html.escape(order.planned_start)} - {html.escape(order.planned_finish)}</dd></div>
         <div><dt>Status</dt><dd>{html.escape(order.execution_status)} ({html.escape(order.progress_rate)})</dd></div>
       </dl>
-      <p>{html.escape(order.instruction)}</p>
+      <div class="ticket-window">
+        <span>{html.escape(order.planned_start)}</span>
+        <strong>to</strong>
+        <span>{html.escape(order.planned_finish)}</span>
+      </div>
+      <p class="instruction">{html.escape(order.instruction)}</p>
       {f'<p class="reason">Delay reason: {html.escape(order.delay_reason)}</p>' if order.delay_reason else ''}
     </article>"""
 
@@ -173,19 +184,39 @@ def demo_work_orders(work_orders: list[WorkOrder], limit: int = 8) -> list[WorkO
 def work_order_css() -> str:
     return """
 body{margin:0;background:#f8fafc;color:#0f172a;font-family:Inter,Arial,sans-serif}
-main{max-width:1120px;margin:0 auto;padding:40px 24px}
+main{max-width:1180px;margin:0 auto;padding:40px 24px}
 .eyebrow{margin:0;color:#2563eb;font-weight:700;text-transform:uppercase;letter-spacing:.08em;font-size:12px}
-h1{margin:6px 0 8px;font-size:34px}
+h1{margin:6px 0 8px;font-size:34px;letter-spacing:0}
 .subtle{color:#64748b}
-.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;margin-top:24px}
-.card{background:white;border:1px solid #dbe3ef;border-radius:8px;padding:18px;box-shadow:0 8px 24px rgba(15,23,42,.06)}
-.card.high{border-color:#b45309}.card.critical{border-color:#dc2626}
-.card-head{display:flex;justify-content:space-between;gap:12px;color:#475569}
-h2{font-size:18px;margin:12px 0}
-dl{display:grid;gap:8px;margin:0}
-dt{font-size:12px;color:#64748b}dd{margin:0;font-weight:650}
-.reason{color:#991b1b;font-weight:650}
+.cards,.work-order-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px;margin-top:24px;align-items:start}
+.work-order-card{background:#fff;border:1px solid #dbe3ef;border-left:4px solid #94a3b8;border-radius:8px;padding:16px;box-shadow:0 8px 22px rgba(15,23,42,.05)}
+.work-order-card.high{border-left-color:#d97706}.work-order-card.critical{border-left-color:#dc2626}.work-order-card.watch{border-left-color:#2563eb}
+.work-order-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}
+.ticket-label{display:block;color:#64748b;font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.06em}
+.work-order-head strong{display:block;margin-top:3px;color:#334155;font-size:13px;line-height:1.25;overflow-wrap:anywhere}
+.badge-stack{display:flex;flex-direction:column;gap:5px;align-items:flex-end;flex:0 0 auto}
+.status-pill{display:inline-flex;align-items:center;justify-content:center;min-height:22px;padding:3px 8px;border-radius:999px;font-size:11px;font-weight:800;text-transform:capitalize;white-space:nowrap}
+.priority-urgent,.risk-critical{color:#991b1b;background:#fee2e2}.priority-high,.risk-high{color:#92400e;background:#fef3c7}.priority-normal,.risk-normal{color:#475569;background:#f1f5f9}.risk-watch{color:#1d4ed8;background:#dbeafe}
+h3{font-size:18px;line-height:1.25;margin:14px 0 4px;color:#0f172a;letter-spacing:0}
+.ticket-subtitle{margin:0 0 14px;color:#64748b;font-size:12px;font-weight:700;overflow-wrap:anywhere}
+.ticket-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px 14px;margin:0}
+.ticket-grid div{min-width:0}
+dt{font-size:10px;color:#64748b;text-transform:uppercase;font-weight:800;letter-spacing:.04em}
+dd{margin:2px 0 0;font-size:13px;line-height:1.3;font-weight:700;overflow-wrap:anywhere}
+.ticket-window{display:grid;grid-template-columns:1fr auto 1fr;gap:8px;align-items:center;margin-top:14px;padding:10px;border-radius:8px;background:#f8fafc;color:#334155;font-size:12px;font-weight:700}
+.ticket-window strong{color:#64748b;font-size:10px;text-transform:uppercase}
+.instruction{margin:12px 0 0;padding-top:10px;border-top:1px solid #e2e8f0;color:#475569;font-size:13px;line-height:1.45}
+.reason{margin:10px 0 0;color:#991b1b;font-weight:700;font-size:13px}
+@media(max-width:720px){.ticket-grid{grid-template-columns:1fr}.ticket-window{grid-template-columns:1fr}.ticket-window strong{display:none}}
 """
+
+
+# What: Compact work-order identifier formatter.
+# Purpose: Prevents long WBS-based IDs from dominating the work-order card layout.
+def _compact_work_order_id(order: WorkOrder) -> str:
+    parts = [order.part_no, order.operation_no, order.activity_id]
+    suffix = "-".join(part for part in parts if part)
+    return suffix or order.work_order_id
 
 
 def _work_order_id(row: dict[str, str]) -> str:
@@ -238,4 +269,3 @@ def _sort_work_orders(work_orders: list[WorkOrder]) -> list[WorkOrder]:
             order.work_order_id,
         ),
     )
-

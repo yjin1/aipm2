@@ -76,6 +76,8 @@ class AgentAnalysis:
     divergences: list["TimingDivergence"] = field(default_factory=list)
     findings: list[str] = field(default_factory=list)
     sponsor_rule_summary: dict[str, int] = field(default_factory=dict)
+    solver_mode: str = ""
+    solver_warnings: list[str] = field(default_factory=list)
 
 
 # What: Row-level timing divergence.
@@ -128,6 +130,8 @@ class PlanningSchedulingAgent:
         self.dataset = AIPMDataset.from_data_dir(self.data_dir)
         self.reasoning_client = reasoning_client
         self.model = model
+        self.last_solver_mode = "not run"
+        self.last_solver_warnings: list[str] = []
 
     # What: End-to-end problem-solving workflow.
     # Purpose: Produces a schedule, diagnostics, optional CSV/report artifacts, and explanation.
@@ -140,6 +144,8 @@ class PlanningSchedulingAgent:
     ) -> AgentResult:
         analysis = self.analyze_reference_logic()
         schedule_rows = self.generate_schedule(strategy=strategy)
+        analysis.solver_mode = self.last_solver_mode
+        analysis.solver_warnings = list(self.last_solver_warnings)
         comparison_rows = compare_with_reference(schedule_rows, self.dataset.reference_schedule)
         analysis.column_differences = column_difference_counts(
             schedule_rows, self.dataset.reference_schedule
@@ -461,28 +467,53 @@ class PlanningSchedulingAgent:
         from ortools_scheduler import solve_with_ortools
 
         target_rows = build_middle_schedule(self.dataset)
+        self.last_solver_warnings = []
         try:
-            return solve_with_ortools(
+            rows = solve_with_ortools(
                 target_rows,
                 resource_capacities=self._resource_capacities(),
                 activity_demands=self._activity_demands(),
                 precedence_edges=self.production_precedence_rules(),
                 temporal_rules=self.production_temporal_rules(),
+                preserve_target_order=False,
             )
-        except RuntimeError:
+            self.last_solver_mode = "OR-Tools precedence + temporal constraints"
+            return rows
+        except RuntimeError as exc:
+            self.last_solver_warnings.append(
+                f"OR-Tools precedence + temporal constraints failed: {exc}"
+            )
             try:
-                return solve_with_ortools(
+                rows = solve_with_ortools(
                     target_rows,
                     resource_capacities=self._resource_capacities(),
                     activity_demands=self._activity_demands(),
                     precedence_edges=self.production_precedence_rules(),
+                    preserve_target_order=False,
                 )
-            except RuntimeError:
-                return solve_with_ortools(
+                self.last_solver_mode = (
+                    "OR-Tools precedence-only relaxed mode"
+                )
+                self.last_solver_warnings.append(
+                    "AIPM relaxed the temporal lag constraints and reran OR-Tools with production precedence only."
+                )
+                return rows
+            except RuntimeError as exc2:
+                self.last_solver_warnings.append(
+                    f"OR-Tools precedence-only relaxed mode failed: {exc2}"
+                )
+                rows = solve_with_ortools(
                     target_rows,
                     resource_capacities=self._resource_capacities(),
                     activity_demands=self._activity_demands(),
                 )
+                self.last_solver_mode = (
+                    "OR-Tools capacity-only emergency relaxed mode"
+                )
+                self.last_solver_warnings.append(
+                    "AIPM relaxed production precedence constraints and reran OR-Tools with resource-capacity constraints only."
+                )
+                return rows
 
     # What: Progress-aware execution schedule generator.
     # Purpose: Applies actual progress updates after the production planning schedule.
@@ -659,6 +690,8 @@ class PlanningSchedulingAgent:
 
         findings = [
             f"Strategy '{strategy}' generated {len(comparisons)} schedule rows for {len(self.dataset.product_orders)} orders.",
+            f"Solver mode: {analysis.solver_mode or 'not recorded'}.",
+            *[f"Solver warning: {warning}" for warning in analysis.solver_warnings],
             f"Exact row matches against the given middle schedule: {exact} / {len(matched)}.",
             f"Resource assignment matches: {resource_matches} / {len(matched)}.",
             f"Average absolute start-time delta: {avg_start_delta:.1f} hours.",
@@ -710,7 +743,13 @@ class PlanningSchedulingAgent:
 
         if self.reasoning_client:
             llm_prompt = self._build_reasoning_prompt(problem, strategy, findings, analysis)
-            findings.append(self.reasoning_client.reason(llm_prompt, model=self.model))
+            try:
+                findings.append(self.reasoning_client.reason(llm_prompt, model=self.model))
+            except Exception as exc:
+                findings.append(
+                    "AIPM backend GPT diagnosis was requested, but the LLM call failed; "
+                    f"the schedule and deterministic diagnostics were still generated. Error: {exc}"
+                )
         else:
             findings.append(
                 "No LLM client is configured yet; findings are generated from deterministic schedule metrics."

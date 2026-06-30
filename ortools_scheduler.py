@@ -18,6 +18,12 @@ def solve_with_ortools(
     activity_demands: dict[tuple[str, str, str, str], float] | None = None,
     precedence_edges: set[tuple[tuple[str, str, str, str], tuple[str, str, str, str]]] | None = None,
     temporal_rules=None,
+    preserve_target_order: bool = True,
+    objective_mode: str = "quality",
+    tardiness_weight: int = 10000,
+    max_tardiness_weight: int = 5000,
+    makespan_weight: int = 100,
+    target_deviation_weight: int = 3,
     max_time_seconds: float = 5.0,
 ) -> list[dict[str, str]]:
     try:
@@ -39,6 +45,7 @@ def solve_with_ortools(
     ends = {}
     intervals_by_resource = defaultdict(list)
     abs_deviations = []
+    rows_by_wbs = defaultdict(list)
 
     for index, row in enumerate(dated_rows):
         target_start = _minutes_from_origin(row["_start"], origin)
@@ -61,6 +68,7 @@ def solve_with_ortools(
         model.AddAbsEquality(start_deviation, start - target_start)
         model.AddAbsEquality(finish_deviation, end - target_finish)
         abs_deviations.extend([start_deviation, finish_deviation])
+        rows_by_wbs[row.get("WBS", "")].append((index, row))
 
     for resource_id, interval_demands in intervals_by_resource.items():
         if len(interval_demands) <= 1:
@@ -73,8 +81,24 @@ def solve_with_ortools(
 
     _add_signature_precedence_constraints(model, dated_rows, starts, ends, precedence_edges or set())
     _add_temporal_constraints(model, dated_rows, starts, ends, temporal_rules or ())
-    _add_soft_order_constraints(model, dated_rows, starts, ends)
-    model.Minimize(sum(abs_deviations))
+    if preserve_target_order:
+        _add_soft_order_constraints(model, dated_rows, starts, ends)
+    objective_terms = _quality_objective_terms(
+        model,
+        dated_rows,
+        starts,
+        ends,
+        rows_by_wbs,
+        origin,
+        horizon,
+        abs_deviations,
+        objective_mode,
+        tardiness_weight,
+        max_tardiness_weight,
+        makespan_weight,
+        target_deviation_weight,
+    )
+    model.Minimize(sum(objective_terms))
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = max_time_seconds
@@ -91,6 +115,80 @@ def solve_with_ortools(
         solved_rows[original_index]["スケジュール結果開始日時"] = format_schedule_datetime(solved_start)
         solved_rows[original_index]["スケジュール結果終了日時"] = format_schedule_datetime(solved_finish)
     return solved_rows
+
+
+# What: OR-Tools objective builder.
+# Purpose: Optimizes real schedule quality first, using target deviation only as a stabilizer.
+def _quality_objective_terms(
+    model,
+    rows: list[dict[str, object]],
+    starts,
+    ends,
+    rows_by_wbs,
+    origin,
+    horizon: int,
+    abs_deviations,
+    objective_mode: str,
+    tardiness_weight: int,
+    max_tardiness_weight: int,
+    makespan_weight: int,
+    target_deviation_weight: int,
+) -> list[object]:
+    if objective_mode == "target_deviation":
+        return list(abs_deviations)
+
+    order_tardiness_vars = []
+    for wbs, wbs_rows in rows_by_wbs.items():
+        if not wbs:
+            continue
+        due = _wbs_due_minutes(wbs_rows, origin)
+        if due is None:
+            continue
+        order_finish = model.NewIntVar(0, horizon, f"order_finish_{_safe_name(wbs)}")
+        model.AddMaxEquality(order_finish, [ends[index] for index, _row in wbs_rows])
+        tardiness = model.NewIntVar(0, horizon, f"tardiness_{_safe_name(wbs)}")
+        model.AddMaxEquality(tardiness, [order_finish - due, 0])
+        order_tardiness_vars.append(tardiness)
+
+    schedule_start = model.NewIntVar(0, horizon, "schedule_start")
+    schedule_finish = model.NewIntVar(0, horizon, "schedule_finish")
+    makespan = model.NewIntVar(0, horizon, "makespan")
+    model.AddMinEquality(schedule_start, [starts[index] for index in starts])
+    model.AddMaxEquality(schedule_finish, [ends[index] for index in ends])
+    model.Add(makespan == schedule_finish - schedule_start)
+
+    max_tardiness = model.NewIntVar(0, horizon, "max_tardiness")
+    if order_tardiness_vars:
+        model.AddMaxEquality(max_tardiness, order_tardiness_vars)
+    else:
+        model.Add(max_tardiness == 0)
+
+    # Tardiness dominates; makespan improves compactness; target deviation prevents unrealistic compression.
+    return (
+        [tardiness * tardiness_weight for tardiness in order_tardiness_vars]
+        + [max_tardiness * max_tardiness_weight, makespan * makespan_weight]
+        + [deviation * target_deviation_weight for deviation in abs_deviations]
+    )
+
+
+# What: WBS due-date extractor.
+# Purpose: Converts each order due date into the CP-SAT minute coordinate system.
+def _wbs_due_minutes(wbs_rows, origin) -> int | None:
+    due_values = [
+        parse_datetime(row.get("納期", ""))
+        for _index, row in wbs_rows
+        if row.get("納期", "")
+    ]
+    due_values = [due for due in due_values if due is not None]
+    if not due_values:
+        return None
+    return _minutes_from_origin(min(due_values), origin)
+
+
+# What: CP-SAT variable-name sanitizer.
+# Purpose: Keeps generated variable names readable while avoiding punctuation-heavy WBS strings.
+def _safe_name(value: str) -> str:
+    return "".join(character if character.isalnum() else "_" for character in value)[:80]
 
 
 # What: Date parser for schedule rows.
@@ -114,7 +212,7 @@ def _dated_rows(rows: list[dict[str, str]]) -> list[dict[str, object]]:
 def _horizon_minutes(rows: list[dict[str, object]], origin) -> int:
     latest = max(row["_finish"] for row in rows)
     span = max(1, int((latest - origin).total_seconds() // 60))
-    return span + 90 * 24 * 60
+    return span + 365 * 24 * 60
 
 
 # What: Timestamp-to-minute conversion helper.

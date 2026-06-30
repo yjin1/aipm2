@@ -3,8 +3,11 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import ssl
 import urllib.error
 import urllib.request
+
+import certifi
 
 
 # What: OpenAI Responses API adapter for the AIPM agent.
@@ -53,6 +56,7 @@ class OpenAIReasoningClient:
         self.base_url = (base_url or os.environ.get("OPENAI_BASE_URL") or DEFAULT_BASE_URL).rstrip("/")
         self.timeout_seconds = timeout_seconds
         self.max_output_tokens = max_output_tokens
+        self.ssl_context = ssl.create_default_context(cafile=certifi.where())
 
     # What: GPT reasoning call.
     # Purpose: Implements the agent protocol using the OpenAI Responses API.
@@ -83,7 +87,11 @@ class OpenAIReasoningClient:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+            with urllib.request.urlopen(
+                request,
+                timeout=self.timeout_seconds,
+                context=self.ssl_context,
+            ) as response:
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
