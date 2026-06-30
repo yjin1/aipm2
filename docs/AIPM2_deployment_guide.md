@@ -12,6 +12,10 @@ already runs LibreChat at `https://semaa.site`.
 - LibreChat calls AIPM2 through an OpenAPI Action.
 - AIPM2 returns links to schedule reports, process reports, schedules,
   findings, divergences, and work orders.
+- The production scheduling path is reference-free. A reference schedule, when
+  uploaded, is used only for comparison diagnostics.
+- Solver relaxations must never be silent. Reports must show the requested
+  strategy, actual solver mode, and any solver warnings.
 
 ## Recommended Names
 
@@ -147,8 +151,31 @@ Use the AIPM2 action for scheduling, strategy listing, report review, work
 orders, and progress scenarios. Use strategy ortools_precedence unless the user
 chooses another strategy. Set use_openai=true for sponsor runs. Do not ask users
 for OpenAI keys. Use uploaded files only; if files are missing, explain the
-missing inputs and stop.
+missing inputs and stop. The three core CSV files are required: product/order,
+work/order activity, and resource master. The reference schedule is optional and
+must be used only for comparison, never for schedule generation. actual_progress.csv
+is optional and supports execution monitoring and updated work orders. Always
+state the run ID, requested strategy, actual solver mode, solver warnings, model,
+and report links. Never hide fallback or constraint relaxation.
 ```
+
+## Current AIPM2 Behavior To Verify
+
+- Required inputs: product/order CSV, work/order activity CSV, and resource
+  master CSV.
+- Optional inputs: reference middle schedule CSV and `actual_progress.csv`.
+- Recommended strategy: `ortools_precedence`.
+- OR-Tools objective: balanced schedule quality, prioritizing tardiness,
+  maximum tardiness, makespan, and then target-date stability.
+- If the strict precedence + temporal model is infeasible, AIPM2 may run a
+  relaxed solver mode, but it must report this clearly in AI Diagnosis/findings.
+- Schedule report includes dashboard, schedule-quality measures, reference
+  comparison when available, feasibility validation, AI diagnosis, resource
+  load, Gantt chart, and process flow.
+- Process-management report includes execution status, management focus,
+  execution exceptions, and **Updated Work Orders**. Updated work orders are
+  shown only for operations touched by `actual_progress.csv`; when no progress
+  is reported, that section is intentionally blank with an explanation.
 
 ## Smoke Test
 
@@ -176,6 +203,20 @@ https://semaa.site/aipm2/runs/{run_id}/process_management_report.html
 https://semaa.site/aipm2/runs/{run_id}/work_orders.html
 ```
 
+In the schedule report, confirm:
+
+```text
+Solver mode: ...
+Solver warning: ...
+```
+
+If solver warnings appear, they should explicitly say which constraint set
+failed and which relaxed mode produced the schedule.
+
+If testing process management, upload `actual_progress.csv` and confirm the
+process report shows `Updated Work Orders`. Without progress updates, the
+section should be blank and explain why.
+
 ## Update Later
 
 ```bash
@@ -194,4 +235,5 @@ curl https://semaa.site/aipm2/health
 | LibreChat action cannot connect | OpenAPI server URL is wrong. | Use `https://semaa.site/aipm2` or internal Docker URL. |
 | AIPM cannot find uploads | Mongo/upload volume settings are wrong. | Check `LIBRECHAT_MONGO_URI` and upload mount. |
 | No AI diagnosis | Backend lacks OpenAI key. | Set `.env` and restart. |
-
+| Report shows solver relaxation | Strict constraints were infeasible. | Read solver warnings; revise temporal/domain rules or accept the reported relaxed mode for demo. |
+| Process report has no updated work orders | No progress rows matched scheduled operations. | Upload `actual_progress.csv` using the progress template for that run. |
