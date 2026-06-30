@@ -61,7 +61,7 @@
             }
           },
           "400": {
-            "description": "AIPM could not find four recent usable LibreChat CSV uploads."
+            "description": "AIPM could not find at least three recent usable LibreChat CSV uploads."
           },
           "500": {
             "description": "AIPM could not access LibreChat MongoDB or storage."
@@ -94,6 +94,7 @@
               "field_repair",
               "ortools_cp",
               "ortools_precedence",
+              "execution_reschedule",
               "reference_replay"
             ],
             "default": "ortools_precedence",
@@ -114,7 +115,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Visible CSV filenames the user uploaded in the current LibreChat conversation. File order does not matter. If filenames are not visible, omit this field and AIPM will use the latest four CSV upload records."
+            "description": "Visible CSV filenames the user uploaded in the current LibreChat conversation. File order does not matter. If filenames are not visible, omit this field and AIPM will use the latest recent CSV upload records. The three core inputs are product/order, work/order, and resource master; reference schedule and actual_progress.csv are optional."
           },
           "max_age_minutes": {
             "type": "integer",
@@ -143,6 +144,9 @@
           "report_url": {
             "type": "string"
           },
+          "process_management_report_url": {
+            "type": "string"
+          },
           "schedule_url": {
             "type": "string"
           },
@@ -150,6 +154,12 @@
             "type": "string"
           },
           "divergences_url": {
+            "type": "string"
+          },
+          "work_orders_url": {
+            "type": "string"
+          },
+          "work_orders_html_url": {
             "type": "string"
           },
           "findings": {
@@ -171,6 +181,7 @@
               "field_repair",
               "ortools_cp",
               "ortools_precedence",
+              "execution_reschedule",
               "reference_replay"
             ]
           },

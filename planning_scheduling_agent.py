@@ -75,6 +75,7 @@ class AgentAnalysis:
     column_differences: list[tuple[str, int]]
     divergences: list["TimingDivergence"] = field(default_factory=list)
     findings: list[str] = field(default_factory=list)
+    sponsor_rule_summary: dict[str, int] = field(default_factory=dict)
 
 
 # What: Row-level timing divergence.
@@ -185,12 +186,19 @@ class PlanningSchedulingAgent:
         column_differences = column_difference_counts(
             build_middle_schedule(self.dataset), self.dataset.reference_schedule
         )
+        try:
+            from sponsor_domain_rules import sponsor_rule_summary
+
+            rule_summary = sponsor_rule_summary()
+        except Exception:
+            rule_summary = {}
         return AgentAnalysis(
             issues=issues,
             timing_rules=timing_rules,
             field_rules=self.infer_field_rules(),
             dependency_edges=dependency_edges,
             column_differences=column_differences,
+            sponsor_rule_summary=rule_summary,
         )
 
     # What: Reference-derived timing rule inference.
@@ -375,6 +383,8 @@ class PlanningSchedulingAgent:
             return self._generate_ortools_schedule()
         if strategy == "ortools_precedence":
             return self._generate_ortools_precedence_schedule()
+        if strategy == "execution_reschedule":
+            return self._generate_execution_reschedule()
         raise ValueError(f"unknown scheduling strategy: {strategy}")
 
     # What: Reference-learning schedule generator.
@@ -445,29 +455,76 @@ class PlanningSchedulingAgent:
             activity_demands=self._activity_demands(),
         )
 
-    # What: OR-Tools schedule generator with learned precedence.
-    # Purpose: Adds stable reference-derived precedence rules to capacity-constrained scheduling.
+    # What: OR-Tools schedule generator with production precedence.
+    # Purpose: Adds extracted sponsor/document process rules without using the reference schedule.
     def _generate_ortools_precedence_schedule(self) -> list[dict[str, str]]:
         from ortools_scheduler import solve_with_ortools
 
-        repaired_rows = self._generate_field_repair_schedule()
-        return solve_with_ortools(
-            repaired_rows,
-            resource_capacities=self._resource_capacities(),
-            activity_demands=self._activity_demands(),
-            precedence_edges=self.combined_precedence_rules(),
-        )
+        target_rows = build_middle_schedule(self.dataset)
+        try:
+            return solve_with_ortools(
+                target_rows,
+                resource_capacities=self._resource_capacities(),
+                activity_demands=self._activity_demands(),
+                precedence_edges=self.production_precedence_rules(),
+                temporal_rules=self.production_temporal_rules(),
+            )
+        except RuntimeError:
+            try:
+                return solve_with_ortools(
+                    target_rows,
+                    resource_capacities=self._resource_capacities(),
+                    activity_demands=self._activity_demands(),
+                    precedence_edges=self.production_precedence_rules(),
+                )
+            except RuntimeError:
+                return solve_with_ortools(
+                    target_rows,
+                    resource_capacities=self._resource_capacities(),
+                    activity_demands=self._activity_demands(),
+                )
 
-    # What: Combined precedence-rule provider.
-    # Purpose: Uses both schedule-derived stable edges and documented flowchart-derived edges.
-    def combined_precedence_rules(
+    # What: Progress-aware execution schedule generator.
+    # Purpose: Applies actual progress updates after the production planning schedule.
+    def _generate_execution_reschedule(self) -> list[dict[str, str]]:
+        from execution_management import load_progress_updates, repair_schedule_with_progress
+
+        planned_rows = self._generate_ortools_precedence_schedule()
+        return repair_schedule_with_progress(planned_rows, load_progress_updates(self.data_dir))
+
+    # What: Production precedence-rule provider.
+    # Purpose: Uses extracted sponsor/document process rules, never the reference schedule.
+    def production_precedence_rules(
         self,
     ) -> set[tuple[tuple[str, str, str, str], tuple[str, str, str, str]]]:
         from marine_design_process_rules import documented_precedence_edges
+        from sponsor_domain_rules import sponsor_precedence_edges
 
-        return self.infer_stable_precedence_rules() | self._reference_consistent_edges(
-            documented_precedence_edges()
+        candidate_edges = documented_precedence_edges() | sponsor_precedence_edges()
+        available = {_operation_signature(activity) for activity in self.dataset.activities}
+        mapped_edges = {
+            edge for edge in candidate_edges if edge[0] in available and edge[1] in available
+        }
+        return _remove_cycle_edges(mapped_edges)
+
+    # What: Production temporal-rule provider.
+    # Purpose: Uses explicit sponsor lag rules when both operations exist in the input data.
+    def production_temporal_rules(self):
+        from sponsor_domain_rules import sponsor_temporal_rules
+
+        available = {_operation_signature(activity) for activity in self.dataset.activities}
+        return tuple(
+            rule
+            for rule in sponsor_temporal_rules()
+            if rule.before in available and rule.after in available
         )
+
+    # What: Combined precedence-rule provider.
+    # Purpose: Backward-compatible alias for production precedence rules.
+    def combined_precedence_rules(
+        self,
+    ) -> set[tuple[tuple[str, str, str, str], tuple[str, str, str, str]]]:
+        return self.production_precedence_rules()
 
     # What: Reference-consistency filter for documented process edges.
     # Purpose: Prevents ambiguous flowchart mappings from becoming infeasible hard constraints.
@@ -611,14 +668,30 @@ class PlanningSchedulingAgent:
         ]
         if strategy == "ortools_precedence":
             from marine_design_process_rules import documented_precedence_edges
+            from sponsor_domain_rules import sponsor_precedence_edges, sponsor_temporal_rules
 
-            documented_edges = documented_precedence_edges()
-            accepted_documented_edges = self._reference_consistent_edges(documented_edges)
+            documented_edges = documented_precedence_edges() | sponsor_precedence_edges()
+            production_edges = self.production_precedence_rules()
             findings.append(
                 "Precedence constraints used: "
-                f"{len(self.infer_stable_precedence_rules())} schedule-derived stable edges "
-                f"+ {len(accepted_documented_edges)} reference-consistent documented flowchart edges "
-                f"out of {len(documented_edges)} candidates."
+                f"{len(production_edges)} production domain edges "
+                f"out of {len(documented_edges)} documented/sponsor candidates."
+            )
+            findings.append(
+                "Sponsor PDF #2 temporal rules active: "
+                f"{len(self.production_temporal_rules())} "
+                f"lag constraints out of {len(sponsor_temporal_rules())} candidates."
+            )
+        if analysis.sponsor_rule_summary:
+            summary = analysis.sponsor_rule_summary
+            findings.append(
+                "Sponsor PDF #2 knowledge catalog: "
+                f"{summary.get('total', 0)} rules "
+                f"({summary.get('implemented', 0)} implemented, "
+                f"{summary.get('partially_implemented', 0)} partially implemented, "
+                f"{summary.get('advisory', 0)} advisory), "
+                f"{summary.get('precedence_candidates', 0)} precedence candidates, "
+                f"{summary.get('temporal_constraints', 0)} temporal constraints."
             )
         if analysis.column_differences:
             top_columns = ", ".join(
@@ -721,6 +794,47 @@ def _activity_key(row: dict[str, str]) -> tuple[str, str, str, str]:
         row.get("工程NO", ""),
         row.get("作業工程ID", ""),
     )
+
+
+# What: Cycle-safe precedence filter.
+# Purpose: Protects the production solver from contradictory extracted precedence rules.
+def _remove_cycle_edges(
+    edges: set[tuple[tuple[str, str, str, str], tuple[str, str, str, str]]],
+) -> set[tuple[tuple[str, str, str, str], tuple[str, str, str, str]]]:
+    accepted: set[tuple[tuple[str, str, str, str], tuple[str, str, str, str]]] = set()
+    for edge in sorted(edges, key=lambda item: (item[0], item[1])):
+        candidate = accepted | {edge}
+        if not _has_cycle(candidate):
+            accepted.add(edge)
+    return accepted
+
+
+# What: Directed-cycle detector.
+# Purpose: Checks operation-level precedence candidates before they become hard constraints.
+def _has_cycle(
+    edges: set[tuple[tuple[str, str, str, str], tuple[str, str, str, str]]],
+) -> bool:
+    graph: dict[tuple[str, str, str, str], set[tuple[str, str, str, str]]] = {}
+    for before, after in edges:
+        graph.setdefault(before, set()).add(after)
+        graph.setdefault(after, set())
+    visiting: set[tuple[str, str, str, str]] = set()
+    visited: set[tuple[str, str, str, str]] = set()
+
+    def visit(node: tuple[str, str, str, str]) -> bool:
+        if node in visiting:
+            return True
+        if node in visited:
+            return False
+        visiting.add(node)
+        for child in graph.get(node, set()):
+            if visit(child):
+                return True
+        visiting.remove(node)
+        visited.add(node)
+        return False
+
+    return any(visit(node) for node in graph)
 
 
 # What: Divergence cause classifier.
@@ -867,6 +981,7 @@ def main() -> int:
             "field_repair",
             "ortools_cp",
             "ortools_precedence",
+            "execution_reschedule",
             "reference_replay",
         ],
         help="Schedule generation strategy.",

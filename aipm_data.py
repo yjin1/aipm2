@@ -185,7 +185,7 @@ class AIPMDataset:
             product_orders=_read_csv(_find_csv(csv_files, PRODUCT_COLUMNS)),
             work_rows=_read_csv(_find_csv(csv_files, WORK_COLUMNS)),
             resources=_read_csv(_find_csv(csv_files, RESOURCE_COLUMNS)),
-            reference_schedule=_read_csv(_find_csv(csv_files, MIDDLE_SCHEDULE_COLUMNS)),
+            reference_schedule=_read_csv_optional(_find_csv_optional(csv_files, MIDDLE_SCHEDULE_COLUMNS)),
         )
 
     # What: Schedulable activity rows from the work-order file.
@@ -214,13 +214,14 @@ class AIPMDataset:
         issues.extend(_require_columns("product order", self.product_orders, PRODUCT_COLUMNS))
         issues.extend(_require_columns("work order", self.work_rows, WORK_COLUMNS))
         issues.extend(_require_columns("resource master", self.resources, RESOURCE_COLUMNS))
-        issues.extend(
-            _require_columns(
-                "middle schedule reference",
-                self.reference_schedule,
-                MIDDLE_SCHEDULE_COLUMNS,
+        if self.reference_schedule:
+            issues.extend(
+                _require_columns(
+                    "middle schedule reference",
+                    self.reference_schedule,
+                    MIDDLE_SCHEDULE_COLUMNS,
+                )
             )
-        )
 
         product_ids = set(self.products_by_wbs)
         resource_ids = set(self.resources_by_id)
@@ -417,16 +418,33 @@ def _read_csv(path: Path) -> list[dict[str, str]]:
         return [{key: value for key, value in row.items()} for row in csv.DictReader(stream)]
 
 
+# What: Optional UTF-8 CSV reader.
+# Purpose: Lets AIPM run without an optional reference schedule file.
+def _read_csv_optional(path: Path | None) -> list[dict[str, str]]:
+    if path is None:
+        return []
+    return _read_csv(path)
+
+
 # What: Schema-based CSV finder.
 # Purpose: Selects the correct input file without relying on fragile localized filenames.
 def _find_csv(files: list[Path], required_columns: list[str]) -> Path:
+    path = _find_csv_optional(files, required_columns)
+    if path is not None:
+        return path
+    raise FileNotFoundError(f"could not find CSV with columns: {required_columns[:4]}...")
+
+
+# What: Optional schema-based CSV finder.
+# Purpose: Detects optional files such as the reference schedule without making them required.
+def _find_csv_optional(files: list[Path], required_columns: list[str]) -> Path | None:
     for path in files:
         with path.open("r", encoding="utf-8-sig", newline="") as stream:
             header = next(csv.reader(stream), [])
         # Column signatures are more stable than filenames when files come from D6/Excel exports.
         if all(column in header for column in required_columns):
             return path
-    raise FileNotFoundError(f"could not find CSV with columns: {required_columns[:4]}...")
+    return None
 
 
 # What: Required-column validator.

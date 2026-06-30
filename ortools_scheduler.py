@@ -17,6 +17,7 @@ def solve_with_ortools(
     resource_capacities: dict[str, float] | None = None,
     activity_demands: dict[tuple[str, str, str, str], float] | None = None,
     precedence_edges: set[tuple[tuple[str, str, str, str], tuple[str, str, str, str]]] | None = None,
+    temporal_rules=None,
     max_time_seconds: float = 5.0,
 ) -> list[dict[str, str]]:
     try:
@@ -71,6 +72,7 @@ def solve_with_ortools(
         model.AddCumulative(intervals, demands, capacity)
 
     _add_signature_precedence_constraints(model, dated_rows, starts, ends, precedence_edges or set())
+    _add_temporal_constraints(model, dated_rows, starts, ends, temporal_rules or ())
     _add_soft_order_constraints(model, dated_rows, starts, ends)
     model.Minimize(sum(abs_deviations))
 
@@ -154,6 +156,41 @@ def _add_signature_precedence_constraints(model, rows, starts, ends, precedence_
             after_index = by_wbs_signature.get((wbs, after_signature))
             if before_index is not None and after_index is not None and before_index != after_index:
                 model.Add(ends[before_index] <= starts[after_index])
+
+
+# What: Sponsor temporal lag constraint builder.
+# Purpose: Applies explicit PDF #2 start/finish spacing rules inside each WBS.
+def _add_temporal_constraints(model, rows, starts, ends, temporal_rules) -> None:
+    if not temporal_rules:
+        return
+    by_wbs_signature = {}
+    for index, row in enumerate(rows):
+        by_wbs_signature[(row.get("WBS", ""), _operation_signature(row))] = index
+
+    wbs_values = {row.get("WBS", "") for row in rows}
+    for wbs in wbs_values:
+        for rule in temporal_rules:
+            before_index = by_wbs_signature.get((wbs, rule.before))
+            after_index = by_wbs_signature.get((wbs, rule.after))
+            if before_index is None or after_index is None or before_index == after_index:
+                continue
+            before_var, after_var = _temporal_vars(rule.relation, starts, ends, before_index, after_index)
+            if rule.min_lag_minutes is not None:
+                model.Add(after_var >= before_var + int(rule.min_lag_minutes))
+            if rule.max_lag_minutes is not None:
+                model.Add(after_var <= before_var + int(rule.max_lag_minutes))
+
+
+# What: Temporal-relation variable selector.
+# Purpose: Maps sponsor start-start and finish-finish rules to CP-SAT variables.
+def _temporal_vars(relation, starts, ends, before_index, after_index):
+    if relation == "finish_finish":
+        return ends[before_index], ends[after_index]
+    if relation == "start_finish":
+        return starts[before_index], ends[after_index]
+    if relation == "finish_start":
+        return ends[before_index], starts[after_index]
+    return starts[before_index], starts[after_index]
 
 
 # What: Operation signature helper.

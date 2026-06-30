@@ -116,6 +116,84 @@ def build_report_html(
 """
 
 
+# What: Process-management HTML report builder.
+# Purpose: Separates execution monitoring and work-order examples from the main schedule report.
+def build_process_management_report_html(
+    schedule_rows: list[dict[str, str]],
+    progress_rows: list[dict[str, str]] | None = None,
+    schedule_report_url: str = "agent_schedule_report.html",
+) -> str:
+    from execution_management import monitor_execution
+    from work_order_agent import demo_work_orders, generate_work_orders, render_work_order_card, work_order_css
+
+    progress_rows = progress_rows or []
+    monitor = monitor_execution(schedule_rows, progress_rows)
+    work_orders = generate_work_orders(schedule_rows, progress_rows)
+    summary = monitor.summary
+    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+    finding_rows = "\n".join(
+        f"""<tr>
+          <td>{escape(finding.severity)}</td>
+          <td>{escape(finding.wbs)}</td>
+          <td>{escape(finding.operation_no)} {escape(finding.activity_name)}</td>
+          <td>{escape(finding.status)}</td>
+          <td>{escape(finding.message)}</td>
+        </tr>"""
+        for finding in monitor.findings[:30]
+    )
+    if not finding_rows:
+        finding_rows = '<tr><td colspan="5">No execution exceptions detected.</td></tr>'
+    cards = "\n".join(render_work_order_card(order) for order in demo_work_orders(work_orders, limit=8))
+    if not cards:
+        cards = "<p>No work-order examples were generated.</p>"
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AIPM Process Management Report</title>
+  <style>{report_css()}{work_order_css()}</style>
+</head>
+<body>
+  <header>
+    <div>
+      <p class="eyebrow">AIPM Process Management</p>
+      <h1>Execution Status and Work Orders</h1>
+      <p class="subtle">Generated {escape(generated_at)} from the current schedule and optional progress updates.</p>
+    </div>
+    <div class="meta">
+      <a class="button-link" href="{escape(schedule_report_url)}">View Current Schedule</a>
+    </div>
+  </header>
+  <section>
+    <h2>Execution Status</h2>
+    <div class="cards">
+      <article class="card"><span>Progress Updates</span><strong>{summary.progress_rows}</strong></article>
+      <article class="card"><span>Completed</span><strong>{summary.completed}</strong></article>
+      <article class="card"><span>In Progress</span><strong>{summary.in_progress}</strong></article>
+      <article class="card"><span>Blocked / Delayed</span><strong>{summary.blocked_or_delayed}</strong></article>
+      <article class="card"><span>Late Unfinished</span><strong>{summary.late_unfinished}</strong></article>
+    </div>
+    {'' if monitor.has_progress else '<p class="subtle">No actual_progress.csv file was provided for this run.</p>'}
+  </section>
+  <section>
+    <h2>Execution Exceptions</h2>
+    <div class="panel scroll">
+      <table>
+        <thead><tr><th>Severity</th><th>WBS</th><th>Operation</th><th>Status</th><th>Message</th></tr></thead>
+        <tbody>{finding_rows}</tbody>
+      </table>
+    </div>
+  </section>
+  <section>
+    <h2>Generated Work Order Examples</h2>
+    <div class="cards">{cards}</div>
+  </section>
+</body>
+</html>"""
+
+
 # What: Agent diagnosis HTML section.
 # Purpose: Displays deterministic and GPT-backed findings when the report is produced by the agent.
 def agent_diagnosis_section(findings: list[str]) -> str:

@@ -16,7 +16,9 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTex
 from pydantic import BaseModel, Field
 
 from openai_reasoning_client import load_env_file
+from execution_management import PROGRESS_COLUMNS, write_progress_template
 from planning_scheduling_agent import PlanningSchedulingAgent, write_findings, write_timing_divergences
+from work_order_agent import generate_work_orders, write_work_orders_csv, write_work_orders_html
 
 
 # What: Deployable FastAPI wrapper for the AIPM planning/scheduling agent.
@@ -67,6 +69,7 @@ Strategy = Literal[
     "field_repair",
     "ortools_cp",
     "ortools_precedence",
+    "execution_reschedule",
     "reference_replay",
 ]
 
@@ -87,9 +90,12 @@ class RunResponse(BaseModel):
     strategy: str
     model: str
     report_url: str
+    process_management_report_url: str
     schedule_url: str
     findings_url: str
     divergences_url: str
+    work_orders_url: str
+    work_orders_html_url: str
     findings: list[str]
 
 
@@ -191,10 +197,19 @@ def list_strategies() -> list[StrategyInfo]:
             strategy="ortools_precedence",
             label="OR-Tools precedence",
             description=(
-                "Uses OR-Tools with learned/documented precedence constraints and deterministic "
-                "post-processing. This is the strongest current general-purpose strategy."
+                "Uses OR-Tools with extracted sponsor/document precedence constraints and deterministic "
+                "post-processing. It does not use the reference schedule for generation."
             ),
-            recommended_for="Default sponsor runs and comparison against the reference schedule.",
+            recommended_for="Default sponsor production-style runs.",
+        ),
+        StrategyInfo(
+            strategy="execution_reschedule",
+            label="Execution reschedule",
+            description=(
+                "Starts from the strongest planning schedule, applies actual progress updates, "
+                "freezes completed/in-progress work, and flags execution exceptions."
+            ),
+            recommended_for="Execution-management tests after workgroups submit actual_progress.csv.",
         ),
         StrategyInfo(
             strategy="ortools_cp",
@@ -259,7 +274,7 @@ def upload_page() -> HTMLResponse:
 async def upload_and_run(
     strategy: Strategy = Form("ortools_precedence"),
     model: str = Form("gpt-5.4-mini"),
-    use_openai: bool = Form(False),
+    use_openai: bool = Form(True),
     files: list[UploadFile] = File(...),
 ) -> HTMLResponse:
     try:
@@ -282,7 +297,7 @@ async def create_csv_text_run(request: Request) -> RunResponse:
     payload = await request.json()
     strategy = payload.get("strategy", "ortools_precedence")
     model = payload.get("model", "gpt-5.4-mini")
-    use_openai = bool(payload.get("use_openai", False))
+    use_openai = bool(payload.get("use_openai", True))
     files = _extract_csv_text_files(payload)
 
     run_id = uuid.uuid4().hex
@@ -303,11 +318,11 @@ async def create_csv_text_run(request: Request) -> RunResponse:
         else:
             missing_content.append(uploaded_file.filename)
 
-    if copied_count < 4:
+    if copied_count < 3:
         raise HTTPException(
             status_code=400,
             detail=(
-                "AIPM received fewer than four CSV files with complete text content. "
+                "AIPM received fewer than three CSV files with complete text content. "
                 "Do not send only filenames or attachment metadata. Missing content for: "
                 + (", ".join(missing_content) if missing_content else "unknown files")
             ),
@@ -332,10 +347,10 @@ def create_librechat_files_run(request: LibreChatFilesRunRequest) -> RunResponse
     data_dir.mkdir(parents=True, exist_ok=True)
 
     resolved_files = _resolve_librechat_file_ids(request.file_ids)
-    if len(resolved_files) < 4:
+    if len(resolved_files) < 3:
         raise HTTPException(
             status_code=400,
-            detail="Expected at least four LibreChat file IDs for the AIPM input set.",
+            detail="Expected at least three LibreChat file IDs for the AIPM input set.",
         )
 
     for index, (source_path, filename, text_content) in enumerate(resolved_files, start=1):
@@ -367,12 +382,13 @@ def create_librechat_recent_run(request: LibreChatRecentFilesRunRequest) -> RunR
         filenames=request.filenames,
         max_age_minutes=request.max_age_minutes,
     )
-    if len(resolved_files) < 4:
+    if len(resolved_files) < 3:
         raise HTTPException(
             status_code=400,
             detail=(
-                "Expected at least four recent LibreChat CSV uploads. "
-                "Upload the four AIPM CSV files in this conversation and try again."
+                "Expected at least three recent LibreChat CSV uploads. "
+                "Upload the product/order, work/order, and resource CSV files in this conversation and try again. "
+                "A reference schedule is optional."
             ),
         )
 
@@ -402,12 +418,12 @@ def create_local_files_run(request: LocalFilesRunRequest) -> RunResponse:
     data_dir.mkdir(parents=True, exist_ok=True)
 
     selected_files = _resolve_local_csv_files(request.files)
-    if len(selected_files) < 4:
+    if len(selected_files) < 3:
         raise HTTPException(
             status_code=400,
             detail=(
-                "Expected at least four local CSV files. Put the product/order, work/order, "
-                "resource master, and reference schedule CSVs in the AIPM data/ folder."
+                "Expected at least three local CSV files. Put the product/order, work/order, "
+                "and resource master CSVs in the AIPM data/ folder. Reference schedule is optional."
             ),
         )
     for source_path in selected_files:
@@ -433,6 +449,7 @@ async def create_run(
     work_order_csv: UploadFile | None = File(None),
     resource_master_csv: UploadFile | None = File(None),
     reference_schedule_csv: UploadFile | None = File(None),
+    actual_progress_csv: UploadFile | None = File(None),
     files: list[UploadFile] | None = File(None),
 ) -> RunResponse:
     return await _create_uploaded_run(
@@ -444,6 +461,7 @@ async def create_run(
             "work_order.csv": work_order_csv,
             "resource_master.csv": resource_master_csv,
             "reference_schedule.csv": reference_schedule_csv,
+            "actual_progress.csv": actual_progress_csv,
         },
         generic_uploads=files or [],
     )
@@ -491,12 +509,12 @@ async def _create_uploaded_run(
         safe_name = f"upload_{index}.csv"
         await _save_upload(upload, data_dir / safe_name)
         saved_count += 1
-    if saved_count < 4:
+    if saved_count < 3:
         raise HTTPException(
             status_code=400,
             detail=(
-                "Upload at least four CSV files: product/order, work/order, "
-                "resource master, and reference middle schedule. File order does not matter."
+                "Upload at least three CSV files: product/order, work/order, "
+                "and resource master. Reference middle schedule and actual_progress.csv are optional."
             ),
         )
 
@@ -540,6 +558,34 @@ def _run_agent(
         )
         findings_path = run_dir / "agent_findings.txt"
         divergences_path = run_dir / "agent_timing_divergences.csv"
+        progress_rows = []
+        try:
+            from execution_management import load_progress_updates
+            from aipm_visualize import build_process_management_report_html
+
+            progress_rows = load_progress_updates(data_dir)
+            work_orders = generate_work_orders(result.schedule_rows, progress_rows)
+            write_work_orders_csv(work_orders, run_dir / "work_orders.csv")
+            write_work_orders_html(work_orders, run_dir / "work_orders.html")
+            (run_dir / "process_management_report.html").write_text(
+                build_process_management_report_html(
+                    result.schedule_rows,
+                    progress_rows=progress_rows,
+                    schedule_report_url=_public_url(f"/runs/{run_dir.name}/report.html"),
+                ),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            work_orders = generate_work_orders(result.schedule_rows, progress_rows)
+            write_work_orders_csv(work_orders, run_dir / "work_orders.csv")
+            write_work_orders_html(work_orders, run_dir / "work_orders.html")
+            (run_dir / "process_management_report.html").write_text(
+                "<!doctype html><html><body>"
+                "<h1>AIPM Process Management Report</h1>"
+                f"<p>Process report fallback generated because visual rendering failed: {_escape(exc)}</p>"
+                "</body></html>",
+                encoding="utf-8",
+            )
         write_findings(result, findings_path)
         write_timing_divergences(result.analysis.divergences, divergences_path)
     except FileNotFoundError as exc:
@@ -553,9 +599,12 @@ def _run_agent(
         strategy=strategy,
         model=model if use_openai else "offline",
         report_url=_public_url(f"/runs/{run_id}/report.html"),
+        process_management_report_url=_public_url(f"/runs/{run_id}/process_management_report.html"),
         schedule_url=_public_url(f"/runs/{run_id}/schedule.csv"),
         findings_url=_public_url(f"/runs/{run_id}/findings"),
         divergences_url=_public_url(f"/runs/{run_id}/divergences.csv"),
+        work_orders_url=_public_url(f"/runs/{run_id}/work_orders.csv"),
+        work_orders_html_url=_public_url(f"/runs/{run_id}/work_orders.html"),
         findings=result.analysis.findings,
     )
 
@@ -564,8 +613,16 @@ def _run_agent(
 # Purpose: Returns the generated visual HTML report for one run.
 @app.get("/runs/{run_id}/report", response_class=HTMLResponse)
 @app.get("/runs/{run_id}/report.html", response_class=HTMLResponse)
+@app.get("/runs/{run_id}/agent_schedule_report.html", response_class=HTMLResponse)
 def get_report(run_id: str) -> FileResponse:
     return _inline_file_response(run_id, "agent_schedule_report.html", "text/html")
+
+
+# What: Process-management report endpoint.
+# Purpose: Returns execution monitoring and work-order examples separately from the schedule report.
+@app.get("/runs/{run_id}/process_management_report.html", response_class=HTMLResponse)
+def get_process_management_report(run_id: str) -> FileResponse:
+    return _inline_file_response(run_id, "process_management_report.html", "text/html")
 
 
 # What: Schedule CSV endpoint.
@@ -587,6 +644,63 @@ def get_findings(run_id: str) -> FileResponse:
 @app.get("/runs/{run_id}/divergences.csv", response_class=Response)
 def get_divergences(run_id: str) -> FileResponse:
     return _file_response(run_id, "agent_timing_divergences.csv", "text/csv")
+
+
+# What: Work-order CSV endpoint.
+# Purpose: Returns workgroup-facing dispatch instructions generated from one run.
+@app.get("/runs/{run_id}/work_orders.csv", response_class=Response)
+def get_work_orders_csv(run_id: str) -> FileResponse:
+    return _file_response(run_id, "work_orders.csv", "text/csv")
+
+
+# What: Work-order HTML endpoint.
+# Purpose: Returns a standalone work-order example page generated from one run.
+@app.get("/runs/{run_id}/work_orders.html", response_class=HTMLResponse)
+def get_work_orders_html(run_id: str) -> FileResponse:
+    return _inline_file_response(run_id, "work_orders.html", "text/html")
+
+
+# What: Progress template endpoint.
+# Purpose: Gives sponsors the actual_progress.csv column format for a completed schedule run.
+@app.get("/runs/{run_id}/progress-template.csv", response_class=Response)
+def get_progress_template(run_id: str) -> FileResponse:
+    run_dir = _require_run_dir(run_id)
+    schedule_path = run_dir / "agent_middle_schedule.csv"
+    if not schedule_path.exists():
+        raise HTTPException(status_code=404, detail="Missing schedule for this run.")
+    template_path = run_dir / "actual_progress_template.csv"
+    with schedule_path.open("r", encoding="utf-8-sig", newline="") as stream:
+        schedule_rows = list(csv.DictReader(stream))
+    write_progress_template(template_path, schedule_rows)
+    return _file_response(run_id, "actual_progress_template.csv", "text/csv")
+
+
+# What: Progress-scenario endpoint.
+# Purpose: Lets users upload only actual_progress.csv after a schedule run to test execution scenarios.
+@app.post("/runs/{run_id}/progress", response_model=RunResponse)
+async def create_progress_scenario_run(
+    run_id: str,
+    model: str = Form("gpt-5.4-mini"),
+    use_openai: bool = Form(True),
+    progress_csv: UploadFile = File(...),
+) -> RunResponse:
+    source_run_dir = _require_run_dir(run_id)
+    source_data_dir = source_run_dir / "data"
+    if not source_data_dir.exists():
+        raise HTTPException(status_code=404, detail="This run does not have reusable input data.")
+
+    scenario_run_id = uuid.uuid4().hex
+    scenario_run_dir = RUNS_DIR / scenario_run_id
+    scenario_data_dir = scenario_run_dir / "data"
+    shutil.copytree(source_data_dir, scenario_data_dir)
+    await _save_upload(progress_csv, scenario_data_dir / "actual_progress.csv")
+    return _run_agent(
+        data_dir=scenario_data_dir,
+        run_dir=scenario_run_dir,
+        strategy="execution_reschedule",
+        model=model,
+        use_openai=use_openai,
+    )
 
 
 # What: Run listing endpoint.
@@ -837,7 +951,7 @@ def _load_recent_librechat_file_records(
             )
         return selected
 
-    return selected[:4]
+    return selected[:5]
 
 
 # What: LibreChat storage path mapper.
@@ -1140,7 +1254,7 @@ def _render_upload_page(
   <main>
     <header>
       <h1>AIPM Planning Agent</h1>
-      <p>Upload the four CSV files in any order. The agent detects product, work, resource, and reference schedule files from their columns.</p>
+      <p>Upload the three core CSV files in any order. The reference schedule and actual progress CSV files are optional.</p>
     </header>
     <section class="panel">
       {error_html}
@@ -1180,9 +1294,12 @@ def _render_upload_result(result: RunResponse) -> str:
         <p>Run ID: {_escape(result.run_id)} | Strategy: {_escape(result.strategy)} | Model: {_escape(result.model)}</p>
         <div class="links">
           <a href="{_escape(result.report_url)}" target="_blank" rel="noreferrer">Open visual report</a>
+          <a href="{_escape(result.process_management_report_url)}" target="_blank" rel="noreferrer">Open process management report</a>
           <a href="{_escape(result.schedule_url)}" target="_blank" rel="noreferrer">Download schedule CSV</a>
           <a href="{_escape(result.findings_url)}" target="_blank" rel="noreferrer">Open findings</a>
           <a href="{_escape(result.divergences_url)}" target="_blank" rel="noreferrer">Download divergences CSV</a>
+          <a href="{_escape(result.work_orders_html_url)}" target="_blank" rel="noreferrer">Open work orders</a>
+          <a href="{_escape(result.work_orders_url)}" target="_blank" rel="noreferrer">Download work orders CSV</a>
         </div>
         <ul>{finding_items}</ul>
       </div>
@@ -1195,10 +1312,21 @@ def _escape(value: object) -> str:
     return html.escape(str(value), quote=True)
 
 
+# What: Run-folder validator.
+# Purpose: Ensures artifact routes cannot escape the generated runs directory.
+def _require_run_dir(run_id: str) -> Path:
+    if not run_id or "/" in run_id or "\\" in run_id or ".." in run_id:
+        raise HTTPException(status_code=404, detail="Invalid run ID.")
+    run_dir = RUNS_DIR / run_id
+    if not run_dir.exists() or not run_dir.is_dir():
+        raise HTTPException(status_code=404, detail="Unknown run ID.")
+    return run_dir
+
+
 # What: Run artifact response helper.
 # Purpose: Serves files safely from the run output directory.
 def _file_response(run_id: str, filename: str, media_type: str) -> FileResponse:
-    path = RUNS_DIR / run_id / filename
+    path = _require_run_dir(run_id) / filename
     if not path.exists():
         raise HTTPException(status_code=404, detail=f"Missing artifact: {filename}")
     return FileResponse(path, media_type=media_type, filename=filename)
@@ -1207,7 +1335,7 @@ def _file_response(run_id: str, filename: str, media_type: str) -> FileResponse:
 # What: Inline artifact response helper.
 # Purpose: Opens browser-viewable artifacts like HTML reports instead of downloading them.
 def _inline_file_response(run_id: str, filename: str, media_type: str) -> FileResponse:
-    path = RUNS_DIR / run_id / filename
+    path = _require_run_dir(run_id) / filename
     if not path.exists():
         raise HTTPException(status_code=404, detail=f"Missing artifact: {filename}")
     return FileResponse(
@@ -1232,33 +1360,15 @@ def create_sample_run(
 
     source_dir = Path("data")
     sample_csvs = list(source_dir.glob("*.csv"))
-    if len(sample_csvs) < 4:
-        raise HTTPException(status_code=500, detail="Expected at least four sample CSV files in data/")
+    if len(sample_csvs) < 3:
+        raise HTTPException(status_code=500, detail="Expected at least three sample CSV files in data/")
     for source_path in sample_csvs:
         shutil.copyfile(source_path, data_dir / source_path.name)
 
-    reasoning_client = None
-    if use_openai:
-        from openai_reasoning_client import OpenAIReasoningClient
-
-        reasoning_client = OpenAIReasoningClient()
-
-    agent = PlanningSchedulingAgent(data_dir=data_dir, reasoning_client=reasoning_client, model=model)
-    result = agent.solve(
+    return _run_agent(
+        data_dir=data_dir,
+        run_dir=run_dir,
         strategy=strategy,
-        output_path=run_dir / "agent_middle_schedule.csv",
-        report_path=run_dir / "agent_schedule_report.html",
-    )
-    write_findings(result, run_dir / "agent_findings.txt")
-    write_timing_divergences(result.analysis.divergences, run_dir / "agent_timing_divergences.csv")
-
-    return RunResponse(
-        run_id=run_id,
-        strategy=strategy,
-        model=model if use_openai else "offline",
-        report_url=_public_url(f"/runs/{run_id}/report.html"),
-        schedule_url=_public_url(f"/runs/{run_id}/schedule.csv"),
-        findings_url=_public_url(f"/runs/{run_id}/findings"),
-        divergences_url=_public_url(f"/runs/{run_id}/divergences.csv"),
-        findings=result.analysis.findings,
+        model=model,
+        use_openai=use_openai,
     )
