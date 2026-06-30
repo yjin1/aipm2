@@ -1,0 +1,190 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "AIPM Planning and Scheduling Agent API",
+    "description": "LibreChat action schema for running AIPM from recent CSV files uploaded through the LibreChat chatbox. This schema does not require users to know hidden LibreChat file_id values.",
+    "version": "0.5.0"
+  },
+  "servers": [
+    {
+      "url": "http://host.docker.internal:8000",
+      "description": "Local AIPM backend from LibreChat Docker"
+    }
+  ],
+  "paths": {
+    "/strategies": {
+      "get": {
+        "operationId": "list_aipm_strategy_choices",
+        "summary": "List AIPM scheduling strategy choices",
+        "description": "Returns the available AIPM scheduling strategies with user-friendly descriptions. Use this when the user asks what strategies are available or wants to choose before running the planner.",
+        "responses": {
+          "200": {
+            "description": "Available AIPM strategy choices",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/StrategyInfo"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/runs/librechat-recent": {
+      "post": {
+        "operationId": "run_aipm_with_recent_librechat_uploads",
+        "summary": "Run AIPM from recent LibreChat CSV uploads",
+        "description": "Runs the AIPM planning/scheduling agent using the user's recent CSV uploads in LibreChat. Pass the visible filenames if available. Do not ask the user for file IDs. Do not paste CSV contents. Do not use local AIPM data-folder files.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LibreChatRecentFilesRunRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Generated AIPM schedule artifacts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "AIPM could not find four recent usable LibreChat CSV uploads."
+          },
+          "500": {
+            "description": "AIPM could not access LibreChat MongoDB or storage."
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "operationId": "check_aipm_health",
+        "summary": "Check AIPM backend health",
+        "responses": {
+          "200": {
+            "description": "AIPM backend is alive"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "LibreChatRecentFilesRunRequest": {
+        "type": "object",
+        "properties": {
+          "strategy": {
+            "type": "string",
+            "enum": [
+              "baseline",
+              "reference_learning",
+              "field_repair",
+              "ortools_cp",
+              "ortools_precedence",
+              "reference_replay"
+            ],
+            "default": "ortools_precedence",
+            "description": "Scheduling strategy to run. Use ortools_precedence unless the user asks otherwise."
+          },
+          "model": {
+            "type": "string",
+            "default": "gpt-5.4-mini",
+            "description": "GPT model name used by the AIPM backend when use_openai is true."
+          },
+          "use_openai": {
+            "type": "boolean",
+            "default": true,
+            "description": "Whether the AIPM backend should use its own OpenAI key for AI diagnosis. Use true for sponsor runs. The AIPM backend must be started with OPENAI_API_KEY."
+          },
+          "filenames": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Visible CSV filenames the user uploaded in the current LibreChat conversation. File order does not matter. If filenames are not visible, omit this field and AIPM will use the latest four CSV upload records."
+          },
+          "max_age_minutes": {
+            "type": "integer",
+            "default": 180,
+            "minimum": 1,
+            "maximum": 1440,
+            "description": "Only consider LibreChat CSV uploads created within this many minutes."
+          }
+        },
+        "required": [
+          "strategy"
+        ]
+      },
+      "RunResponse": {
+        "type": "object",
+        "properties": {
+          "run_id": {
+            "type": "string"
+          },
+          "strategy": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "report_url": {
+            "type": "string"
+          },
+          "schedule_url": {
+            "type": "string"
+          },
+          "findings_url": {
+            "type": "string"
+          },
+          "divergences_url": {
+            "type": "string"
+          },
+          "findings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "StrategyInfo": {
+        "type": "object",
+        "properties": {
+          "strategy": {
+            "type": "string",
+            "enum": [
+              "baseline",
+              "reference_learning",
+              "field_repair",
+              "ortools_cp",
+              "ortools_precedence",
+              "reference_replay"
+            ]
+          },
+          "label": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "recommended_for": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

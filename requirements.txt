@@ -1,0 +1,7 @@
+fastapi==0.124.2
+uvicorn[standard]==0.38.0
+python-multipart==0.0.20
+ortools==9.15.6755
+pymupdf==1.27.2.3
+pypdf==6.10.0
+pymongo==4.15.4

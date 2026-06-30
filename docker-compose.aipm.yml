@@ -1,0 +1,19 @@
+services:
+  aipm-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: aipm-agent
+    restart: unless-stopped
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      LIBRECHAT_MONGO_URI: ${LIBRECHAT_MONGO_URI:-mongodb://mongodb:27017/LibreChat}
+      LIBRECHAT_CONTAINER_UPLOADS_DIR: ${LIBRECHAT_CONTAINER_UPLOADS_DIR:-/app/uploads}
+      LIBRECHAT_UPLOADS_DIR: ${LIBRECHAT_UPLOADS_DIR:-/app/librechat_uploads}
+    volumes:
+      - ./data:/app/data:ro
+      - ./outputs:/app/outputs
+      - ${LIBRECHAT_UPLOADS_HOST_DIR:-../LibreChat/uploads}:/app/librechat_uploads:ro
+    ports:
+      - "8000:8000"
